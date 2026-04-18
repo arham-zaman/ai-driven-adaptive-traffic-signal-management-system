@@ -9,17 +9,24 @@ from backend.database.db import init_db
 from backend.signal_controller.phase_manager import PhaseManager
 from backend.signal_controller.timer import SignalTimer
 
-# ─── Init ─────────────────────────────────────────────────────
+# ─── Import routers ───────────────────────────────────────────
+from backend.api.routes.predictions import router as predictions_router
+from backend.api.routes.signals import router as signals_router, set_phase_manager
+from backend.api.routes.logs import router as logs_router
+from backend.api.routes.manual_control import router as control_router, set_controllers
+from backend.api.websocket import router as ws_router, set_ws_controllers
+
+# ─── App ──────────────────────────────────────────────────────
 app = FastAPI(
     title="AI Traffic Signal Management System",
     description="Adaptive traffic signal control using LSTM/GRU",
     version="1.0.0"
 )
 
-# ─── CORS — allow React frontend ──────────────────────────────
+# ─── CORS ─────────────────────────────────────────────────────
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=CORS_ORIGINS,
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -29,86 +36,40 @@ app.add_middleware(
 phase_manager = PhaseManager()
 signal_timer  = SignalTimer(phase_manager)
 
+# ─── Inject into routers ──────────────────────────────────────
+set_phase_manager(phase_manager)
+set_controllers(phase_manager, signal_timer)
+set_ws_controllers(phase_manager, signal_timer)
+
+# ─── Include routers ──────────────────────────────────────────
+app.include_router(predictions_router)
+app.include_router(signals_router)
+app.include_router(logs_router)
+app.include_router(control_router)
+app.include_router(ws_router)
+
 # ─── Startup ──────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup():
     init_db()
     print("Database ready!")
+    print("All routes loaded!")
     print("API started!")
 
-# ─── Routes ───────────────────────────────────────────────────
+# ─── Root ─────────────────────────────────────────────────────
 @app.get("/")
 def root():
     return {
         "message": "AI Traffic Signal API is running!",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "routes": [
+            "/predictions",
+            "/signals",
+            "/logs",
+            "/control",
+            "/ws"
+        ]
     }
-
-@app.get("/status")
-def get_status():
-    """Get current signal states and timer status"""
-    return signal_timer.get_status()
-
-@app.get("/signals")
-def get_signals():
-    """Get current signal state for all lanes"""
-    return {
-        "states":     phase_manager.get_states(),
-        "green_lane": phase_manager.current_green_lane,
-        "is_manual":  phase_manager.is_manual
-    }
-
-@app.post("/signals/next")
-def next_phase(north: int = 0, south: int = 0,
-               east: int = 0, west: int = 0):
-    """Trigger next phase with vehicle counts"""
-    lane_counts = {
-        "north": north,
-        "south": south,
-        "east":  east,
-        "west":  west
-    }
-    phase = phase_manager.next_phase(lane_counts)
-    return phase
-
-@app.post("/signals/manual/{lane}")
-def manual_override(lane: str, green_time: float = 30):
-    """Manually set a lane to green"""
-    try:
-        phase = phase_manager.manual_override(lane, green_time)
-        return {"success": True, "phase": phase}
-    except ValueError as e:
-        return {"success": False, "error": str(e)}
-
-@app.post("/signals/release")
-def release_manual():
-    """Release manual control"""
-    phase_manager.release_manual()
-    return {"success": True, "message": "Back to adaptive mode"}
-
-@app.post("/signals/emergency")
-def emergency_stop():
-    """Emergency — all signals RED"""
-    states = phase_manager.emergency_all_red()
-    return {"success": True, "states": states}
-
-@app.post("/timer/start")
-def start_timer(north: int = 5, south: int = 5,
-                east: int = 5, west: int = 5):
-    """Start adaptive signal timer"""
-    lane_counts = {
-        "north": north, "south": south,
-        "east": east,   "west": west
-    }
-    signal_timer.start(lane_counts)
-    return {"success": True, "message": "Timer started!"}
-
-@app.post("/timer/stop")
-def stop_timer():
-    """Stop signal timer"""
-    signal_timer.stop()
-    return {"success": True, "message": "Timer stopped!"}
-
 
 if __name__ == "__main__":
     import uvicorn
