@@ -1,0 +1,11 @@
+venv/
+__pycache__/
+*.pyc
+*.pyo
+*.h5
+*.pkl
+*.db
+*.pt
+backend/data/raw_videos/
+backend/data/extracted_frames/
+.env 
