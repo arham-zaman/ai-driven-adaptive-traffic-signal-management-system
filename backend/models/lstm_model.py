@@ -13,13 +13,13 @@ class LSTMModel:
     def __init__(self):
         self.model = None
         self.scaler = None
-        self.model_path = SAVED_MODELS_DIR / "lstm_model.h5"
+        self.model_path = SAVED_MODELS_DIR / "lstm_model.keras"        
         self.scaler_path = SAVED_MODELS_DIR / "lstm_scaler.pkl"
 
     def build(self):
         """Build LSTM model architecture"""
-        from tensorflow.keras.models import Sequential
-        from tensorflow.keras.layers import LSTM, Dense, Dropout
+        from tensorflow.keras.models import Sequential # type: ignore
+        from tensorflow.keras.layers import LSTM, Dense, Dropout # pyright: ignore[reportMissingModuleSource]
         from tensorflow.keras.optimizers import Adam
 
         model = Sequential([

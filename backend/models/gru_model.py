@@ -13,7 +13,7 @@ class GRUModel:
     def __init__(self):
         self.model = None
         self.scaler = None
-        self.model_path = SAVED_MODELS_DIR / "gru_model.h5"
+        self.model_path = SAVED_MODELS_DIR / "gru_model.keras"
         self.scaler_path = SAVED_MODELS_DIR / "gru_scaler.pkl"
 
     def build(self):

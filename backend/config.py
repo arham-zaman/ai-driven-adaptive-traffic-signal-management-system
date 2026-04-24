@@ -1,4 +1,5 @@
 import os
+print(os.getcwd())  # current directory
 from pathlib import Path
 
 # ─── Base Paths ───────────────────────────────────────────────
@@ -52,3 +53,18 @@ CORS_ORIGINS = ["http://localhost:3000"]   # React frontend
 
 # ─── Database ─────────────────────────────────────────────────
 DATABASE_URL = f"sqlite:///{BASE_DIR}/database/traffic.db"
+# ─── Traffic Density Categories ───────────────────────────────
+DENSITY_CATEGORIES = {
+    "LOW":    (0, 5),
+    "MEDIUM": (6, 15),
+    "HIGH":   (16, 9999)
+}
+
+GREEN_TIME_BY_CATEGORY = {
+    "LOW":    15,
+    "MEDIUM": 30,
+    "HIGH":   50
+}
+
+# ─── Updated Model Settings ───────────────────────────────────
+EPOCHS = 100  # pehle 50 tha

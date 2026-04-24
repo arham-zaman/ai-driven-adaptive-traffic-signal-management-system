@@ -16,6 +16,12 @@ VIDEO_LANE_MAP = {
     "Traffic4.mp4": "traffic4",
     "Traffic7.mp4": "traffic7",
     "Traffic8.mp4": "traffic8",
+    # ── Kaggle videos ──────────────────────────────
+    "Traffic9.mp4":  "traffic9",
+    "Traffic10.mp4": "traffic10",
+    "Traffic11.mp4": "traffic11",
+    "Traffic12.mp4": "traffic12",
+    "Traffic13.mp4": "traffic13",
 }
 
 def process_all_videos():
