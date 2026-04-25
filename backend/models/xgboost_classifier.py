@@ -6,7 +6,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 from backend.config import SAVED_MODELS_DIR, DENSITY_CATEGORIES, GREEN_TIME_BY_CATEGORY
 
-CLASSIFIER_FEATURES = ["queue_length", "avg_speed", "density", "count_change"]
+CLASSIFIER_FEATURES = ["queue_length", "density", "congestion_ratio", "count_change"]
 
 class XGBoostClassifier:
     def __init__(self):

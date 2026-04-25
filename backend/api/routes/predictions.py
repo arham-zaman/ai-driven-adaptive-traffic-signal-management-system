@@ -2,19 +2,18 @@ from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from pathlib import Path
 import numpy as np
-import pandas as pd
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
-from backend.database.db import get_db, Prediction
+from backend.database.db import get_db, Prediction, TrafficLog
 from backend.config import FEATURES, SEQUENCE_LENGTH, SAVED_MODELS_DIR, LANES
 
 router = APIRouter(prefix="/predictions", tags=["predictions"])
 
-# ─── Load models once at startup ──────────────────────────────
-_gru_model  = None
-_rf_model   = None
-_xgb_model  = None
+# ─── Load models once ─────────────────────────────────────────
+_gru_model = None
+_rf_model  = None
+_xgb_model = None
 
 def get_gru_model():
     global _gru_model
@@ -41,90 +40,98 @@ def get_xgb_model():
     return _xgb_model
 
 
-# ─── Full pipeline: detect → classify → predict green time ────
 def run_pipeline(
     lane: str,
     vehicle_count: float,
     queue_length: float,
-    avg_speed: float,
     density: float,
+    congestion_ratio: float,
+    count_change: float,
     db: Session
 ) -> dict:
     """
-    Full integrated pipeline:
-    1. RF/XGBoost classifies traffic level (LOW/MEDIUM/HIGH)
-    2. GRU predicts exact green time (regression)
-    3. PhaseManager gets the result
-    4. Saved to DB
+    Full AI pipeline:
+    1. RF + XGBoost  → classify traffic level (LOW/MEDIUM/HIGH)
+    2. GRU           → predict exact green time (seconds)
+    3. Weighted blend → final decision
+    4. Save to DB
     """
+    lane = lane.lower()
 
     # ── Step 1: Classify traffic level ────────────────────────
-    classifier_features = np.array([queue_length, avg_speed, density,
-                                     vehicle_count])  # count_change approx
+    # ✅ FIXED: Correct feature order to match scaler!
+    clf_features = np.array([
+        queue_length,
+        density,
+        congestion_ratio,
+        count_change
+    ])
+    
     try:
-        rf  = get_rf_model()
-        xgb = get_xgb_model()
-        rf_result  = rf.predict_green_time(classifier_features)
-        xgb_result = xgb.predict_green_time(classifier_features)
-        # Use higher-confidence classifier result
-        if rf_result["confidence"] >= xgb_result["confidence"]:
-            best_clf = rf_result
-        else:
-            best_clf = xgb_result
+        rf         = get_rf_model()
+        xgb        = get_xgb_model()
+        rf_result  = rf.predict_green_time(clf_features)
+        xgb_result = xgb.predict_green_time(clf_features)
+        best_clf   = rf_result if rf_result["confidence"] >= xgb_result["confidence"] \
+                     else xgb_result
     except Exception as e:
         best_clf = {"category": "MEDIUM", "green_time": 30,
-                    "confidence": 0, "model": "fallback",
-                    "error": str(e)}
+                    "confidence": 0, "model": "fallback", "error": str(e)}
 
-    # ── Step 2: GRU regression → precise green time ───────────
+    # ── Step 2: GRU → exact green time in seconds ─────────────
     try:
-        gru = get_gru_model()
-        current = np.array([[vehicle_count, queue_length, avg_speed, density]])
+        gru      = get_gru_model()
+        # Create sequence for GRU prediction
+        current  = np.array([[vehicle_count, queue_length, density, congestion_ratio]])
         sequence = np.repeat(current, SEQUENCE_LENGTH, axis=0)
-        gru_prediction = gru.predict(sequence)
-        gru_prediction = max(10, min(60, gru_prediction))  # clamp 10-60s
+        gru_time = gru.predict(sequence)  # Direct 10-60s value
     except Exception as e:
-        # Fallback to classifier green time
-        gru_prediction = best_clf["green_time"]
+        gru_time = float(best_clf["green_time"])
 
-    # ── Step 3: Final decision — weighted blend ────────────────
-    # GRU 60% + Classifier 40%
-    final_green_time = round(
-        0.6 * gru_prediction + 0.4 * best_clf["green_time"], 1
+    # ── Step 3: Weighted blend ─────────────────────────────────
+    final_time = round(0.6 * gru_time + 0.4 * best_clf["green_time"], 1)
+    final_time = float(np.clip(final_time, 10, 60))
+
+    # ── Step 4: Save TrafficLog ────────────────────────────────
+    log = TrafficLog(
+        lane          = lane,
+        vehicle_count = int(vehicle_count),
+        queue_length  = queue_length,
+        avg_speed     = 0.0,  # Not used anymore
+        density       = density
     )
-    final_green_time = max(10, min(60, final_green_time))
+    db.add(log)
 
-    # ── Step 4: Save to DB ─────────────────────────────────────
+    # ── Step 5: Save Prediction ────────────────────────────────
     record = Prediction(
-        lane=lane,
-        predicted_green_time=final_green_time,
-        model_used=f"pipeline(gru+{best_clf['model']})"
+        lane                 = lane,
+        predicted_green_time = final_time,
+        model_used           = f"pipeline(gru+{best_clf['model']})"
     )
     db.add(record)
     db.commit()
 
     return {
-        "lane":                 lane,
-        "predicted_green_time": final_green_time,
-        "traffic_category":     best_clf["category"],
-        "classifier_green":     best_clf["green_time"],
-        "gru_green":            round(gru_prediction, 2),
+        "lane":                  lane,
+        "predicted_green_time":  final_time,
+        "traffic_category":      best_clf["category"],
+        "classifier_green":      best_clf["green_time"],
+        "gru_green":             round(gru_time, 2),
         "classifier_confidence": best_clf["confidence"],
-        "model_used":           f"pipeline(gru+{best_clf['model']})",
+        "model_used":            f"pipeline(gru+{best_clf['model']})",
         "input": {
-            "vehicle_count": vehicle_count,
-            "queue_length":  queue_length,
-            "avg_speed":     avg_speed,
-            "density":       density
+            "vehicle_count":    vehicle_count,
+            "queue_length":     queue_length,
+            "density":          density,
+            "congestion_ratio": congestion_ratio,
+            "count_change":     count_change
         }
     }
 
 
-# ─── API Routes ───────────────────────────────────────────────
-
 @router.get("/")
 def get_all_predictions(db: Session = Depends(get_db)):
-    predictions = db.query(Prediction).order_by(
+    preds = db.query(Prediction).order_by(
         Prediction.timestamp.desc()
     ).limit(100).all()
     return [{
@@ -134,7 +141,7 @@ def get_all_predictions(db: Session = Depends(get_db)):
         "predicted_green_time": round(p.predicted_green_time, 2),
         "actual_green_time":    p.actual_green_time,
         "model_used":           p.model_used
-    } for p in predictions]
+    } for p in preds]
 
 
 @router.post("/predict")
@@ -142,19 +149,17 @@ def predict_green_time(
     lane: str,
     vehicle_count: float = 5,
     queue_length: float  = 2,
-    avg_speed: float     = 20,
     density: float       = 0.5,
+    congestion_ratio: float = 0.4,
+    count_change: float = 1,
     db: Session = Depends(get_db)
 ):
-    """Full pipeline prediction for a lane"""
-    if lane not in LANES:
+    """Full AI pipeline prediction for a lane"""
+    if lane.lower() not in LANES:
         return {"error": f"Invalid lane. Choose from {LANES}"}
     try:
-        result = run_pipeline(
-            lane, vehicle_count, queue_length,
-            avg_speed, density, db
-        )
-        return result
+        return run_pipeline(lane, vehicle_count, queue_length,
+                            density, congestion_ratio, count_change, db)
     except Exception as e:
         return {"error": str(e)}
 
@@ -162,23 +167,22 @@ def predict_green_time(
 @router.post("/predict/all")
 def predict_all_lanes(
     north_count: float = 5, south_count: float = 5,
-    east_count: float  = 5, west_count: float  = 5,
+    east_count:  float = 5, west_count:  float = 5,
     db: Session = Depends(get_db)
 ):
     """Predict green time for all 4 lanes at once"""
-    lane_counts = {
-        "north": north_count, "south": south_count,
-        "east":  east_count,  "west":  west_count
-    }
+    counts = {"north": north_count, "south": south_count,
+              "east": east_count,   "west": west_count}
     results = {}
-    for lane, count in lane_counts.items():
+    for lane, count in counts.items():
         try:
             results[lane] = run_pipeline(
-                lane=lane,
+                lane=lane, 
                 vehicle_count=count,
-                queue_length=count * 0.8,
-                avg_speed=20.0,
+                queue_length=count * 0.8, 
                 density=min(count / 20.0, 1.0),
+                congestion_ratio=min(1.0, (count * 0.8) / max(count, 1)),
+                count_change=1,
                 db=db
             )
         except Exception as e:
@@ -186,16 +190,38 @@ def predict_all_lanes(
     return results
 
 
+@router.post("/update_actual/{prediction_id}")
+def update_actual_green_time(
+    prediction_id: int,
+    actual_time: float,
+    db: Session = Depends(get_db)
+):
+    """Update actual green time after signal cycle completes"""
+    pred = db.query(Prediction).filter(Prediction.id == prediction_id).first()
+    if not pred:
+        return {"error": "Prediction not found"}
+    pred.actual_green_time = actual_time
+    db.commit()
+    return {
+        "success":    True,
+        "id":         prediction_id,
+        "predicted":  pred.predicted_green_time,
+        "actual":     actual_time,
+        "difference": round(abs(pred.predicted_green_time - actual_time), 2)
+    }
+
+
 @router.get("/history/{lane}")
 def get_lane_history(lane: str, db: Session = Depends(get_db)):
-    predictions = db.query(Prediction).filter(
-        Prediction.lane == lane
+    preds = db.query(Prediction).filter(
+        Prediction.lane == lane.lower()
     ).order_by(Prediction.timestamp.desc()).limit(50).all()
     return [{
         "timestamp":            str(p.timestamp),
         "predicted_green_time": round(p.predicted_green_time, 2),
+        "actual_green_time":    p.actual_green_time,
         "model_used":           p.model_used
-    } for p in predictions]
+    } for p in preds]
 
 
 @router.get("/stats")

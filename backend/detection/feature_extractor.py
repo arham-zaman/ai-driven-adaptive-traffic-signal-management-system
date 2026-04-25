@@ -8,18 +8,15 @@ from backend.config import LANES, PROCESSED_DIR
 class FeatureExtractor:
     def __init__(self, lane_area_pixels=50000):
         self.lane_area = lane_area_pixels
-        self.prev_centers = {}  # track previous centers for speed
 
     def extract_features(self, frame_data: list, lane_name: str) -> pd.DataFrame:
         rows = []
         prev_count = 0
-        prev_centers = []
-        fps = 30  # assume 30fps
 
         for fd in frame_data:
-            detections = fd["detections"]
+            detections    = fd["detections"]
             vehicle_count = len(detections)
-            time_sec = fd["time_sec"]
+            time_sec      = fd["time_sec"]
 
             # ── Queue Length ──────────────────────────────────
             queue_length = self._estimate_queue(detections)
@@ -30,12 +27,15 @@ class FeatureExtractor:
             )
             density = round(total_vehicle_area / self.lane_area, 4)
 
-            # ── Real Speed Calculation ────────────────────────
-            avg_speed = self._calculate_speed(
-                detections, prev_centers, fps
+            # ── Congestion Ratio ──────────────────────────────
+            # ✅ FIXED FORMULA: min(1.0, queued / total)
+            # 0.0 = no congestion (vehicles flowing)
+            # 1.0 = full congestion (all vehicles queued)
+            congestion_ratio = round(
+                min(1.0, queue_length / max(vehicle_count, 1)), 4
             )
 
-            # ── Count change ──────────────────────────────────
+            # ── Count Change ──────────────────────────────────
             count_change = abs(vehicle_count - prev_count)
 
             # ── Category ──────────────────────────────────────
@@ -47,58 +47,33 @@ class FeatureExtractor:
                 category = "HIGH"
 
             rows.append({
-                "frame":         fd["frame"],
-                "time_sec":      time_sec,
-                "lane":          lane_name,
-                "vehicle_count": vehicle_count,
-                "queue_length":  queue_length,
-                "density":       density,
-                "avg_speed":     avg_speed,
-                "count_change":  count_change,
-                "category":      category,
+                "frame":            fd["frame"],
+                "time_sec":         time_sec,
+                "lane":             lane_name,
+                "vehicle_count":    vehicle_count,
+                "queue_length":     queue_length,
+                "density":          density,
+                "congestion_ratio": congestion_ratio,  # ✅ CORRECT
+                "count_change":     count_change,
+                "category":         category,
             })
 
-            prev_count   = vehicle_count
-            prev_centers = [d["center"] for d in detections]
+            prev_count = vehicle_count
 
         df = pd.DataFrame(rows)
         return df
 
-    def _calculate_speed(self, detections, prev_centers, fps):
-        """Calculate average speed using optical flow approximation"""
-        if not detections or not prev_centers:
-            return 0.0
-
-        curr_centers = [d["center"] for d in detections]
-        speeds = []
-
-        for curr in curr_centers:
-            # Find closest previous center
-            if prev_centers:
-                distances = [
-                    np.sqrt((curr[0]-p[0])**2 + (curr[1]-p[1])**2)
-                    for p in prev_centers
-                ]
-                min_dist = min(distances)
-                # pixels per frame → km/h approximation
-                # assuming 1 pixel ≈ 0.05 meters, 5 frames skip
-                speed_ms = (min_dist * 0.05 * fps) / 5
-                speed_kmh = speed_ms * 3.6
-                if speed_kmh < 120:  # filter unrealistic speeds
-                    speeds.append(speed_kmh)
-
-        return round(np.mean(speeds), 2) if speeds else 0.0
-
     def _estimate_queue(self, detections: list) -> int:
+        """Count vehicles that are close together (queued)"""
         if len(detections) < 2:
             return len(detections)
         centers = [d["center"] for d in detections]
-        queued = 0
+        queued  = 0
         for i, c1 in enumerate(centers):
             for j, c2 in enumerate(centers):
                 if i != j:
                     dist = np.sqrt(
-                        (c1[0]-c2[0])**2 + (c1[1]-c2[1])**2
+                        (c1[0] - c2[0])**2 + (c1[1] - c2[1])**2
                     )
                     if dist < 80:
                         queued += 1

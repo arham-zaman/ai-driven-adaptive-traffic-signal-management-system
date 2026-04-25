@@ -1,5 +1,4 @@
 import os
-print(os.getcwd())  # current directory
 from pathlib import Path
 
 # ─── Base Paths ───────────────────────────────────────────────
@@ -30,19 +29,22 @@ MAX_GREEN_TIME = 60     # seconds
 YELLOW_TIME = 3         # seconds
 DEFAULT_CYCLE = 30      # seconds
 
-# ─── LSTM / GRU Model Settings ────────────────────────────────
-SEQUENCE_LENGTH = 10    # last 10 time steps as input
+# ─── Feature Settings ─────────────────────────────────────────
+# IMPORTANT: These must match what's in CSV files!
 FEATURES = [
     "vehicle_count",
     "queue_length",
-    "avg_speed",
-    "density"
+    "density",
+    "congestion_ratio"  # NEW: queue_length / vehicle_count (0 = free, 1 = jam)
 ]
 NUM_FEATURES = len(FEATURES)
+
+# ─── LSTM / GRU Model Settings ────────────────────────────────
+SEQUENCE_LENGTH = 10    # last 10 time steps as input
 LSTM_UNITS = 64
 GRU_UNITS = 64
 DROPOUT_RATE = 0.2
-EPOCHS = 50
+EPOCHS = 100            # ✅ SINGLE definition (was duplicate before)
 BATCH_SIZE = 32
 LEARNING_RATE = 0.001
 
@@ -53,6 +55,7 @@ CORS_ORIGINS = ["http://localhost:3000"]   # React frontend
 
 # ─── Database ─────────────────────────────────────────────────
 DATABASE_URL = f"sqlite:///{BASE_DIR}/database/traffic.db"
+
 # ─── Traffic Density Categories ───────────────────────────────
 DENSITY_CATEGORIES = {
     "LOW":    (0, 5),
@@ -66,5 +69,11 @@ GREEN_TIME_BY_CATEGORY = {
     "HIGH":   50
 }
 
-# ─── Updated Model Settings ───────────────────────────────────
-EPOCHS = 100  # pehle 50 tha
+# ─── Classifier Features ──────────────────────────────────────
+# ✅ FIXED: Must match training features!
+CLASSIFIER_FEATURES = [
+    "queue_length",
+    "density", 
+    "congestion_ratio",
+    "count_change"
+]
