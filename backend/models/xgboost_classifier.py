@@ -17,21 +17,25 @@ class XGBoostClassifier:
         self.scaler_path = SAVED_MODELS_DIR / "xgboost_scaler.pkl"
         self.classes = ["LOW", "MEDIUM", "HIGH"]
 
-    def train(self, df: pd.DataFrame):
-        from xgboost import XGBClassifier
-        from sklearn.preprocessing import StandardScaler, LabelEncoder
-        from sklearn.model_selection import train_test_split
-        from sklearn.metrics import classification_report, accuracy_score
-        from sklearn.utils.class_weight import compute_sample_weight
-
-        print("Training XGBoost Classifier...")
-
+    def _add_category(self, df: pd.DataFrame) -> pd.DataFrame:
         if "category" not in df.columns:
+            df = df.copy()
             df["category"] = df["vehicle_count"].apply(
                 lambda x: "LOW" if x <= 5
                 else "MEDIUM" if x <= 15
                 else "HIGH"
             )
+        return df
+
+    def train(self, df: pd.DataFrame):
+        from xgboost import XGBClassifier
+        from sklearn.preprocessing import StandardScaler, LabelEncoder
+        from sklearn.model_selection import train_test_split
+        from sklearn.metrics import classification_report, accuracy_score
+        from imblearn.over_sampling import SMOTE  # pip install imbalanced-learn
+
+        print("Training XGBoost Classifier...")
+        df = self._add_category(df)
 
         X = df[CLASSIFIER_FEATURES].values
         y = df["category"].values
@@ -42,15 +46,25 @@ class XGBoostClassifier:
         self.scaler = StandardScaler()
         X_scaled = self.scaler.fit_transform(X)
 
-        X_train, X_test, y_train, y_test = train_test_split(
-            X_scaled, y_encoded, test_size=0.2,
-            random_state=42, stratify=y_encoded
-        )
+        # ── Show distribution BEFORE SMOTE ────────────────────
+        print("\nClass distribution BEFORE SMOTE:")
+        unique, counts = np.unique(y, return_counts=True)
+        for u, c in zip(unique, counts):
+            print(f"  {u}: {c} samples")
 
-        # Fix imbalance with sample weights
-        sample_weights = compute_sample_weight(
-            class_weight='balanced',
-            y=y_train
+        # ── Apply SMOTE ────────────────────────────────────────
+        smote = SMOTE(random_state=42)
+        X_resampled, y_resampled = smote.fit_resample(X_scaled, y_encoded)
+
+        print("\nClass distribution AFTER SMOTE:")
+        unique, counts = np.unique(y_resampled, return_counts=True)
+        for u, c in zip(unique, counts):
+            label = self.le.inverse_transform([u])[0]
+            print(f"  {label}: {c} samples")
+
+        X_train, X_test, y_train, y_test = train_test_split(
+            X_resampled, y_resampled,
+            test_size=0.2, random_state=42, stratify=y_resampled
         )
 
         self.model = XGBClassifier(
@@ -64,7 +78,6 @@ class XGBoostClassifier:
         )
         self.model.fit(
             X_train, y_train,
-            sample_weight=sample_weights,
             eval_set=[(X_test, y_test)],
             verbose=False
         )
@@ -81,8 +94,7 @@ class XGBoostClassifier:
 
         # Feature importance
         importance = dict(zip(
-            CLASSIFIER_FEATURES,
-            self.model.feature_importances_
+            CLASSIFIER_FEATURES, self.model.feature_importances_
         ))
         print("Feature Importance:")
         for feat, imp in sorted(
@@ -136,18 +148,15 @@ class XGBoostClassifier:
         if self.model is None:
             self.load()
         importance = dict(zip(
-            CLASSIFIER_FEATURES,
-            self.model.feature_importances_
+            CLASSIFIER_FEATURES, self.model.feature_importances_
         ))
         return dict(sorted(
-            importance.items(),
-            key=lambda x: x[1], reverse=True
+            importance.items(), key=lambda x: x[1], reverse=True
         ))
 
 
 if __name__ == "__main__":
     from backend.config import PROCESSED_DIR
-
     dfs = []
     for csv_file in PROCESSED_DIR.glob("*.csv"):
         dfs.append(pd.read_csv(csv_file))
