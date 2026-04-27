@@ -77,30 +77,3 @@ CLASSIFIER_FEATURES = [
     "congestion_ratio",
     "count_change"
 ]
-
-# ─── Advanced Features (for improved models) ───────────────────
-# ✅ IMPROVEMENT #1: Advanced features for better predictions
-ADVANCED_FEATURES = [
-    "vehicle_trend_3",       # Change over last 3 frames
-    "queue_trend_3",         # Queue change over 3 frames
-    "vehicle_acceleration",  # Second derivative
-    "normalized_congestion", # Better 0-1 scale
-    "occupancy_ratio",       # Relative to recent max
-    "vehicle_ma_3",          # 3-frame moving average
-    "density_trend",         # Density change
-    "queue_to_vehicle_ratio",# Queue/vehicle ratio
-    "density_normalized"     # Normalized density 0-1
-]
-
-# ✅ EXTENDED FEATURES (Basic + Advanced)
-FEATURES_EXTENDED = FEATURES + ADVANCED_FEATURES
-NUM_FEATURES_EXTENDED = len(FEATURES_EXTENDED)
-
-# ─── Model Selection ───────────────────────────────────────────
-# Use basic features for backward compatibility
-# Set to True for improved models with advanced features
-USE_EXTENDED_FEATURES = False  # Change to True if using advanced models
-
-if USE_EXTENDED_FEATURES:
-    FEATURES = FEATURES_EXTENDED
-    NUM_FEATURES = NUM_FEATURES_EXTENDED
