@@ -1,7 +1,8 @@
+import numpy as np
+import pandas as pd
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from pathlib import Path
-import numpy as np
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent.parent))
 
@@ -10,36 +11,53 @@ from backend.config import FEATURES, SEQUENCE_LENGTH, SAVED_MODELS_DIR, LANES
 
 router = APIRouter(prefix="/predictions", tags=["predictions"])
 
-# ─── Load models once ─────────────────────────────────────────
-_gru_model = None
-_rf_model  = None
-_xgb_model = None
+# ─────────────────────────────────────────────────────────────────────────────
+# MODEL SELECTION RATIONALE (for FYP presentation):
+#
+#   REGRESSION  → Trained both LSTM and GRU.
+#                 GRU achieved lower MAE → GRU Improved selected.
+#
+#   CLASSIFIER  → Trained both Random Forest and XGBoost.
+#                 XGBoost (Optuna-tuned via OptimizedTrafficClassifier)
+#                 achieved higher accuracy → XGBoost selected.
+#
+#   Both baseline models (lstm_model.py, rf_classifier.py) are kept in
+#   the codebase for evaluation comparison — they are NOT used in the
+#   live inference pipeline.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ─── Load models once (singleton pattern) ────────────────────
+_gru_model       = None
+_classifier      = None   # OptimizedTrafficClassifier (best = XGBoost)
 
 def get_gru_model():
+    """
+    Regression model — GRU Improved selected over LSTM.
+    (LSTM is kept in models/ for comparison only.)
+    """
     global _gru_model
     if _gru_model is None:
-        from backend.models.gru_model import GRUModel
-        _gru_model = GRUModel()
+        from backend.models.gru_model_improved import GRUModelImproved
+        _gru_model = GRUModelImproved()
         _gru_model.load()
     return _gru_model
 
-def get_rf_model():
-    global _rf_model
-    if _rf_model is None:
-        from backend.models.rf_classifier import TrafficClassifier
-        _rf_model = TrafficClassifier()
-        _rf_model.load()
-    return _rf_model
-
-def get_xgb_model():
-    global _xgb_model
-    if _xgb_model is None:
-        from backend.models.xgboost_classifier import XGBoostClassifier
-        _xgb_model = XGBoostClassifier()
-        _xgb_model.load()
-    return _xgb_model
+def get_classifier():
+    """
+    Classification model — OptimizedTrafficClassifier auto-selects
+    the best between RF and XGBoost. In practice XGBoost wins.
+    (Basic rf_classifier.py and xgboost_classifier.py are kept for
+    evaluation comparison only.)
+    """
+    global _classifier
+    if _classifier is None:
+        from backend.models.optimized_classifier import OptimizedTrafficClassifier
+        _classifier = OptimizedTrafficClassifier()
+        _classifier.load()
+    return _classifier
 
 
+# ─── Core pipeline ───────────────────────────────────────────
 def run_pipeline(
     lane: str,
     vehicle_count: float,
@@ -50,63 +68,72 @@ def run_pipeline(
     db: Session
 ) -> dict:
     """
-    Full AI pipeline:
-    1. RF + XGBoost  → classify traffic level (LOW/MEDIUM/HIGH)
-    2. GRU           → predict exact green time (seconds)
-    3. Weighted blend → final decision
-    4. Save to DB
+    Full AI inference pipeline:
+      1. OptimizedClassifier (XGBoost) → traffic category LOW/MEDIUM/HIGH
+      2. GRU Improved                  → exact green time in seconds
+      3. Weighted blend (60/40)        → final green time
+      4. Persist to DB
     """
     lane = lane.lower()
 
-    # ── Step 1: Classify traffic level ────────────────────────
-    # ✅ FIXED: Correct feature order to match scaler!
+    # ── Step 1: Classify traffic level (XGBoost wins) ────────
     clf_features = np.array([
         queue_length,
         density,
         congestion_ratio,
         count_change
     ])
-    
-    try:
-        rf         = get_rf_model()
-        xgb        = get_xgb_model()
-        rf_result  = rf.predict_green_time(clf_features)
-        xgb_result = xgb.predict_green_time(clf_features)
-        best_clf   = rf_result if rf_result["confidence"] >= xgb_result["confidence"] \
-                     else xgb_result
-    except Exception as e:
-        best_clf = {"category": "MEDIUM", "green_time": 30,
-                    "confidence": 0, "model": "fallback", "error": str(e)}
 
-    # ── Step 2: GRU → exact green time in seconds ─────────────
+    try:
+        clf        = get_classifier()
+        clf_result = clf.predict(clf_features)
+        # clf_result = {"category": "HIGH", "confidence": 92.3, "model_used": "XGBoost"}
+        category   = clf_result["category"]
+        clf_conf   = clf_result["confidence"]
+        clf_model  = clf_result.get("model_used", "optimized")
+
+        # Map category → fallback green time
+        category_green = {"LOW": 15, "MEDIUM": 30, "HIGH": 50}
+        clf_green_time = category_green.get(category, 30)
+
+    except Exception as e:
+        category      = "MEDIUM"
+        clf_green_time = 30
+        clf_conf       = 0
+        clf_model      = "fallback"
+        print(f"[Classifier fallback] {e}")
+
+    # ── Step 2: GRU Improved → exact green time ──────────────
     try:
         gru      = get_gru_model()
-        # Create sequence for GRU prediction
-        current  = np.array([[vehicle_count, queue_length, density, congestion_ratio]])
+        current  = np.array([[vehicle_count, queue_length,
+                               density, congestion_ratio]])
         sequence = np.repeat(current, SEQUENCE_LENGTH, axis=0)
-        gru_time = gru.predict(sequence)  # Direct 10-60s value
+        gru_time = gru.predict(sequence)
     except Exception as e:
-        gru_time = float(best_clf["green_time"])
+        gru_time = float(clf_green_time)
+        print(f"[GRU fallback] {e}")
 
-    # ── Step 3: Weighted blend ─────────────────────────────────
-    final_time = round(0.6 * gru_time + 0.4 * best_clf["green_time"], 1)
+    # ── Step 3: Weighted blend ────────────────────────────────
+    # GRU is the primary regressor (60%), classifier provides
+    # a category-based sanity check (40%).
+    final_time = round(0.6 * gru_time + 0.4 * clf_green_time, 1)
     final_time = float(np.clip(final_time, 10, 60))
 
-    # ── Step 4: Save TrafficLog ────────────────────────────────
+    # ── Step 4: Persist ──────────────────────────────────────
     log = TrafficLog(
         lane          = lane,
         vehicle_count = int(vehicle_count),
         queue_length  = queue_length,
-        avg_speed     = 0.0,  # Not used anymore
+        avg_speed     = 0.0,
         density       = density
     )
     db.add(log)
 
-    # ── Step 5: Save Prediction ────────────────────────────────
     record = Prediction(
         lane                 = lane,
         predicted_green_time = final_time,
-        model_used           = f"pipeline(gru+{best_clf['model']})"
+        model_used           = f"GRU_improved+{clf_model}"
     )
     db.add(record)
     db.commit()
@@ -114,11 +141,12 @@ def run_pipeline(
     return {
         "lane":                  lane,
         "predicted_green_time":  final_time,
-        "traffic_category":      best_clf["category"],
-        "classifier_green":      best_clf["green_time"],
+        "traffic_category":      category,
+        "classifier_green":      clf_green_time,
         "gru_green":             round(gru_time, 2),
-        "classifier_confidence": best_clf["confidence"],
-        "model_used":            f"pipeline(gru+{best_clf['model']})",
+        "classifier_confidence": clf_conf,
+        "classifier_model":      clf_model,
+        "model_used":            f"GRU_improved+{clf_model}",
         "input": {
             "vehicle_count":    vehicle_count,
             "queue_length":     queue_length,
@@ -128,6 +156,8 @@ def run_pipeline(
         }
     }
 
+
+# ─── Routes ──────────────────────────────────────────────────
 
 @router.get("/")
 def get_all_predictions(db: Session = Depends(get_db)):
@@ -147,14 +177,14 @@ def get_all_predictions(db: Session = Depends(get_db)):
 @router.post("/predict")
 def predict_green_time(
     lane: str,
-    vehicle_count: float = 5,
-    queue_length: float  = 2,
-    density: float       = 0.5,
+    vehicle_count: float    = 5,
+    queue_length: float     = 2,
+    density: float          = 0.5,
     congestion_ratio: float = 0.4,
-    count_change: float = 1,
+    count_change: float     = 1,
     db: Session = Depends(get_db)
 ):
-    """Full AI pipeline prediction for a lane"""
+    """Full AI pipeline prediction for a single lane."""
     if lane.lower() not in LANES:
         return {"error": f"Invalid lane. Choose from {LANES}"}
     try:
@@ -170,20 +200,20 @@ def predict_all_lanes(
     east_count:  float = 5, west_count:  float = 5,
     db: Session = Depends(get_db)
 ):
-    """Predict green time for all 4 lanes at once"""
-    counts = {"north": north_count, "south": south_count,
-              "east": east_count,   "west": west_count}
+    """Predict green time for all 4 lanes simultaneously."""
+    counts  = {"north": north_count, "south": south_count,
+               "east":  east_count,  "west":  west_count}
     results = {}
     for lane, count in counts.items():
         try:
             results[lane] = run_pipeline(
-                lane=lane, 
-                vehicle_count=count,
-                queue_length=count * 0.8, 
-                density=min(count / 20.0, 1.0),
-                congestion_ratio=min(1.0, (count * 0.8) / max(count, 1)),
-                count_change=1,
-                db=db
+                lane             = lane,
+                vehicle_count    = count,
+                queue_length     = count * 0.8,
+                density          = min(count / 20.0, 1.0),
+                congestion_ratio = min(1.0, (count * 0.8) / max(count, 1)),
+                count_change     = 1,
+                db               = db
             )
         except Exception as e:
             results[lane] = {"error": str(e)}
@@ -196,7 +226,7 @@ def update_actual_green_time(
     actual_time: float,
     db: Session = Depends(get_db)
 ):
-    """Update actual green time after signal cycle completes"""
+    """Record actual green time once a signal cycle completes."""
     pred = db.query(Prediction).filter(Prediction.id == prediction_id).first()
     if not pred:
         return {"error": "Prediction not found"}
